@@ -324,6 +324,8 @@ class Annotation(DataObject):
         self.__value = value
         self.__cve_ref = cve_ref
         self.__xml_node = xml_node
+        self.__parent = None
+        self.__children = []
 
     @property
     def ID(self):
@@ -361,6 +363,20 @@ class Annotation(DataObject):
     @text.setter
     def text(self, value):
         self.value = value
+
+    @property
+    def children(self):
+        return self.__children
+
+    @property
+    def parent(self):
+        return self.__parent
+
+    def _register_parent(self, parent_ann):
+        """ [Internal] """
+        if parent_ann:
+            self.__parent = parent_ann
+            self.__parent.__children.append(self)
 
     def __repr__(self):
         return f"Annotation(ID={repr(self.ID)},value={repr(self.value)})"
@@ -433,6 +449,10 @@ class RefAnnotation(Annotation):
     @property
     def duration(self):
         return self.__ref.duration if self.ref is not None else None
+
+    @property
+    def parent(self):
+        return self.__ref
 
     def resolve(self, elan_doc):
         _ref_ann = elan_doc.annotation(self.__ref_id)
@@ -615,14 +635,29 @@ class Tier(DataObject):
                 return child
         return None
 
-    def filter(self, from_ts=None, to_ts=None):
+    def filter(self, from_ts=None, to_ts=None, use_parent_from_ts=False, use_parent_to_ts=False):
         """ Filter utterances by from_ts or to_ts or both
-        If this tier is not a time-based tier everything will be returned
+        If this tier is not a time-based tier everything will be returned by default.
+        If use_parent_from_ts or use_parent_to_ts is True, then the start and end times for this annotation
+        are taken from the nearest time-aligned ancestor of this annotation (applies to non-time-aligned
+        annotations only; for time-aligned annotations, the annotation's own start and end times are always used).
         """
         for ann in self.annotations:
-            if from_ts is not None and ann.from_ts is not None and ann.from_ts < from_ts:
+            ann_from_ts = ann.from_ts
+            if use_parent_from_ts:
+                while not ann_from_ts:
+                    parent = ann.parent
+                    ann_from_ts = parent.from_ts
+
+            ann_to_ts = ann.to_ts
+            if use_parent_to_ts:
+                while not ann_to_ts:
+                    parent = ann.parent
+                    ann_to_ts = parent.to_ts
+
+            if from_ts is not None and ann_from_ts is not None and ann_from_ts < from_ts:
                 continue
-            elif to_ts is not None and ann.to_ts is not None and ann.from_ts > to_ts:
+            elif to_ts is not None and ann_to_ts is not None and ann_to_ts > to_ts:
                 continue
             else:
                 yield ann
@@ -668,7 +703,7 @@ class Tier(DataObject):
                               elan.ts2msec("00:00:01.600"),
                               ann_ref_id=a1.ID)
         
-        Annotations in Symbolic-Associtation tiers:
+        Annotations in Symbolic-Association tiers:
 
         >>> eaf.new_linguistic_type('Translate', 'Symbolic_Association')
         >>> tt = eaf.new_tier('Person1 (Translate)', 'Translate', 'Person1 (Utterance)')
@@ -720,6 +755,7 @@ class Tier(DataObject):
             ann_info.set('ANNOTATION_ID', self.doc.new_annotation_id())
             self.__xml_node.append(ann_node)
             ann_obj = self._add_annotation_xml(ann_node)
+            ann_obj._register_parent(ann_ref)
             self.doc._register_ann(ann_obj)
             return ann_obj
         elif self.stereotype in ('Time_Subdivision', 'Symbolic_Subdivision'):
@@ -759,6 +795,7 @@ class Tier(DataObject):
                     self.__xml_node.append(ann_node)
                     ann_obj = self._add_annotation_xml(ann_node)
                     ann_obj.resolve(self.doc)
+                    ann_obj._register_parent(ann_ref)
                     self.doc._register_ann(ann_obj)
                     ann_objs.append(ann_obj)
                 return ann_objs
@@ -793,6 +830,7 @@ class Tier(DataObject):
                     ann_info.set('ANNOTATION_ID', self.doc.new_annotation_id())
                     self.__xml_node.append(ann_node)
                     ann_obj = self._add_annotation_xml(ann_node)
+                    ann_obj._register_parent(ann_ref)
                     self.doc._register_ann(ann_obj)
 
                     ann_objs.append(ann_obj)
@@ -814,6 +852,7 @@ class Tier(DataObject):
             self.__xml_node.append(ann_node)
             ann_obj = self._add_annotation_xml(ann_node)
             ann_obj.resolve(self.doc)
+            ann_obj._register_parent(ann_ref)
             self.doc._register_ann(ann_obj)
             return ann_obj
         else:
@@ -1773,6 +1812,15 @@ class Doc(DataObject):
         for ann in self.__ann_map.values():
             if ann.ref_id:
                 ann.resolve(self)
+                ann._register_parent(ann.ref)
+        # register parent-child relationships for non-reference annotations
+        aligned_child_tiers = [t for t in self if t.stereotype in ['Included_In', 'Time_Subdivision']]
+        for child_t in aligned_child_tiers:
+            parent_t = child_t.parent
+            for parent_ann in parent_t:
+                for child_ann in child_t.filter(parent_ann.from_ts, parent_ann.to_ts):
+                    child_ann._register_parent(parent_ann)
+                
 
 
     @classmethod
